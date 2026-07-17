@@ -37,12 +37,49 @@ function writeOutbox(operations) {
 }
 
 function queueOperation(operation) {
-  const operations = readOutbox().filter(item => {
-    if (operation.type === 'create') return !(item.type === 'create' && item.order.id === operation.order.id)
+  const operations = readOutbox()
+
+  if (operation.type === 'update') {
+    const createIndex = operations.findIndex(item => (
+      item.type === 'create' && item.order.id === operation.id
+    ))
+
+    if (createIndex >= 0) {
+      operations[createIndex] = {
+        ...operations[createIndex],
+        order: { ...operations[createIndex].order, status: operation.status },
+      }
+      writeOutbox(operations)
+      return
+    }
+  }
+
+  const nextOperations = operations.filter(item => {
+    if (operation.type === 'create') {
+      const itemId = item.type === 'create' ? item.order.id : item.id
+      return itemId !== operation.order.id
+    }
     return !(item.type === 'update' && item.id === operation.id)
   })
-  operations.push(operation)
-  writeOutbox(operations)
+  nextOperations.push(operation)
+  writeOutbox(nextOperations)
+}
+
+function reconcileOutbox(remoteOrders) {
+  const remoteById = new Map(remoteOrders.map(order => [order.id, order]))
+  const remaining = readOutbox().filter(operation => {
+    const id = operation.type === 'create' ? operation.order.id : operation.id
+    const remoteOrder = remoteById.get(id)
+    if (!remoteOrder) return true
+
+    const expectedStatus = operation.type === 'create'
+      ? Number(operation.order.status) || 0
+      : Number(operation.status) || 0
+    return remoteOrder.status < expectedStatus
+  })
+
+  writeOutbox(remaining)
+  return remaining
 }
 
 function applyOutbox(remoteOrders, operations) {
@@ -86,15 +123,12 @@ export function useOrderSync() {
     const operations = readOutbox()
     if (!operations.length) return
 
-    const remaining = [...operations]
     for (const operation of operations) {
       if (operation.type === 'create') {
         await createCloudOrder(operation.order)
       } else {
         await updateCloudOrder(operation.id, operation.status)
       }
-      remaining.shift()
-      writeOutbox(remaining)
     }
   }, [])
 
@@ -112,12 +146,23 @@ export function useOrderSync() {
         await flushOutbox()
         let remoteOrders = await fetchCloudOrders()
         const remoteIds = new Set(remoteOrders.map(order => order.id))
+        const pendingCreateIds = new Set(
+          readOutbox()
+            .filter(operation => operation.type === 'create')
+            .map(operation => operation.order.id)
+        )
         const localOnlyOrders = readLocalOrders().filter(order => !remoteIds.has(order.id))
 
-        for (const order of localOnlyOrders) await createCloudOrder(order)
-        if (localOnlyOrders.length) remoteOrders = await fetchCloudOrders()
+        for (const order of localOnlyOrders) {
+          if (!pendingCreateIds.has(order.id)) queueOperation({ type: 'create', order })
+        }
 
-        const merged = applyOutbox(remoteOrders, readOutbox())
+        if (readOutbox().length) {
+          await flushOutbox()
+          remoteOrders = await fetchCloudOrders()
+        }
+
+        const merged = applyOutbox(remoteOrders, reconcileOutbox(remoteOrders))
         if (mountedRef.current) {
           commitOrders(merged)
           setSyncState({ mode: 'online', message: '两台手机已同步' })
@@ -127,7 +172,7 @@ export function useOrderSync() {
           closeWatcherRef.current = watchCloudOrders(
             nextOrders => {
               if (!mountedRef.current) return
-              commitOrders(applyOutbox(nextOrders, readOutbox()))
+              commitOrders(applyOutbox(nextOrders, reconcileOutbox(nextOrders)))
               setSyncState({ mode: 'online', message: '两台手机已同步' })
             },
             error => {
