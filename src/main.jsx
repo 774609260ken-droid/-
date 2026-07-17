@@ -1,6 +1,7 @@
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
+import { useOrderSync } from './useOrderSync.js'
 
 const brands = [
   {
@@ -103,6 +104,10 @@ const iceOptions = ['去冰', '少冰', '正常冰', '热饮']
 
 const statusText = ['等他发现', '他接单啦', '已经买好', '投喂成功']
 const nextActionText = ['这杯我请了 ♡', '我已经买好啦', '她已经喝到啦']
+const queryRole = new URLSearchParams(window.location.search).get('role')
+const lockedRole = queryRole === 'boy' || queryRole === 'girl'
+const initialRole = queryRole === 'boy' ? 'boy' : 'girl'
+const BOY_PIN = '1021'
 
 function readSaved(key, fallback) {
   try {
@@ -112,8 +117,32 @@ function readSaved(key, fallback) {
   }
 }
 
+function playTone() {
+  try {
+    const AudioContext = window.AudioContext || window.webkitAudioContext
+    if (!AudioContext) return
+    const context = window.__miaomiaoAudioContext || new AudioContext()
+    window.__miaomiaoAudioContext = context
+    context.resume?.()
+    const oscillator = context.createOscillator()
+    const gain = context.createGain()
+    oscillator.frequency.value = 760
+    gain.gain.setValueAtTime(0.08, context.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.35)
+    oscillator.connect(gain)
+    gain.connect(context.destination)
+    oscillator.start()
+    oscillator.stop(context.currentTime + 0.35)
+  } catch {
+  }
+}
+
+function orderText(order) {
+  return `${order.brand} · ${order.drink}\n${order.sweetness} · ${order.ice}\n参考金额：¥${order.price}${order.note ? `\n留言：${order.note}` : ''}`
+}
+
 function App() {
-  const [mode, setMode] = useState('girl')
+  const [mode, setMode] = useState(initialRole)
   const [brandId, setBrandId] = useState(brands[0].id)
   const brand = brands.find(item => item.id === brandId) ?? brands[0]
   const [drinkId, setDrinkId] = useState(brands[0].drinks[0].id)
@@ -121,13 +150,44 @@ function App() {
   const [sweetness, setSweetness] = useState('五分糖')
   const [ice, setIce] = useState('少冰')
   const [note, setNote] = useState('')
-  const [orders, setOrders] = useState(() => readSaved('miaomiaoOrders', []))
   const [toast, setToast] = useState('')
+  const [boyUnlocked, setBoyUnlocked] = useState(() => sessionStorage.getItem('miaomiaoBoyUnlocked') === 'true')
+  const [alertsEnabled, setAlertsEnabled] = useState(() => readSaved('miaomiaoAlerts', false))
+  const { orders, syncState, addOrder, advanceOrder: syncAdvanceOrder, syncNow } = useOrderSync()
+  const knownOrderIds = useRef(new Set(orders.map(order => order.id)))
+  const alertsReady = useRef(false)
 
   const totalSpent = useMemo(
     () => orders.reduce((sum, order) => sum + order.price, 0),
     [orders]
   )
+
+  useEffect(() => {
+    if (syncState.mode === 'connecting') return
+    knownOrderIds.current = new Set(orders.map(order => order.id))
+    alertsReady.current = true
+  }, [syncState.mode])
+
+  useEffect(() => {
+    const nextIds = new Set(orders.map(order => order.id))
+    if (!alertsReady.current) {
+      knownOrderIds.current = nextIds
+      return
+    }
+
+    const newOrders = orders.filter(order => !knownOrderIds.current.has(order.id))
+    knownOrderIds.current = nextIds
+    if (!newOrders.length || mode !== 'boy' || !alertsEnabled) return
+
+    const latest = newOrders[newOrders.length - 1]
+    navigator.vibrate?.([160, 80, 160])
+    playTone()
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification('淼淼想喝东西啦 ♡', {
+        body: `${latest.brand} · ${latest.drink} · ${latest.sweetness} · ${latest.ice}`,
+      })
+    }
+  }, [alertsEnabled, mode, orders])
 
   function flash(message) {
     setToast(message)
@@ -141,14 +201,10 @@ function App() {
     setDrinkId(nextBrand.drinks[0].id)
   }
 
-  function save(nextOrders) {
-    setOrders(nextOrders)
-    localStorage.setItem('miaomiaoOrders', JSON.stringify(nextOrders))
-  }
-
   function submitOrder() {
+    const createdAtMs = Date.now()
     const nextOrder = {
-      id: String(Date.now()),
+      id: crypto.randomUUID?.() || `${createdAtMs}-${Math.random().toString(16).slice(2)}`,
       brand: brand.name,
       drink: drink.name,
       emoji: drink.emoji,
@@ -157,43 +213,70 @@ function App() {
       ice,
       note: note.trim(),
       status: 0,
+      createdAtMs,
       time: new Date().toLocaleString('zh-CN', {
         month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
       })
     }
-    save([...orders, nextOrder])
+    addOrder(nextOrder)
     setNote('')
     flash('订单已经偷偷发给他啦 ♡')
   }
 
   function advanceOrder(id) {
-    const nextOrders = orders.map(order => {
-      if (order.id !== id || order.status >= 3) return order
-      return { ...order, status: order.status + 1 }
-    })
-    const updated = nextOrders.find(order => order.id === id)
-    save(nextOrders)
+    const updated = syncAdvanceOrder(id)
     const messages = ['', '你接下这杯啦 ♡', '已经标记为买好啦', '投喂成功，恋爱余额 +1']
     flash(messages[updated?.status] ?? '状态已更新')
   }
+
+  function unlockBoy() {
+    sessionStorage.setItem('miaomiaoBoyUnlocked', 'true')
+    setBoyUnlocked(true)
+  }
+
+  async function enableAlerts() {
+    if ('Notification' in window && Notification.permission === 'default') {
+      await Notification.requestPermission()
+    }
+    localStorage.setItem('miaomiaoAlerts', 'true')
+    setAlertsEnabled(true)
+    playTone()
+    navigator.vibrate?.(100)
+    flash('新订单提醒已开启')
+  }
+
+  async function copyOrder(order) {
+    try {
+      await navigator.clipboard.writeText(orderText(order))
+      flash('订单已复制，可以去官方小程序付款啦')
+    } catch {
+      flash('长按订单信息即可复制')
+    }
+  }
+
+  const showingBoyGate = mode === 'boy' && !boyUnlocked
 
   return (
     <>
       <main className="app-shell">
         <header className="topbar">
           <div>
-            <h1>淼淼今天吃什么了 ♡</h1>
-            <p>只给我们两个人的小店</p>
+            <h1>{mode === 'boy' ? '淼淼的订单工作台 ♡' : '淼淼今天吃什么了 ♡'}</h1>
+            <p>{mode === 'boy' ? '男朋友专属入口' : '只给我们两个人的小店'}</p>
           </div>
-          <div className="avatar">🧋</div>
+          <div className="avatar">{mode === 'boy' ? '💌' : '🧋'}</div>
         </header>
 
-        <nav className="mode-switch" aria-label="切换页面">
+        <SyncChip state={syncState} onRetry={syncNow} />
+
+        <nav className={`mode-switch ${lockedRole ? 'role-locked' : ''}`} aria-label="切换页面">
           <button className={mode === 'girl' ? 'active' : ''} onClick={() => setMode('girl')}>她的点单端</button>
           <button className={mode === 'boy' ? 'active' : ''} onClick={() => setMode('boy')}>男朋友工作台</button>
         </nav>
 
-        {mode === 'girl' ? (
+        {showingBoyGate ? (
+          <PinGate onUnlock={unlockBoy} />
+        ) : mode === 'girl' ? (
           <section>
             <div className="hero">
               <span>今日份小特权</span>
@@ -270,13 +353,66 @@ function App() {
                 <div><b>¥{totalSpent}</b><span>累计参考金额</span></div>
               </div>
             </div>
-            <OrderList orders={orders} admin onAdvance={advanceOrder} />
+            <button className={`alert-button ${alertsEnabled ? 'enabled' : ''}`} onClick={enableAlerts}>
+              {alertsEnabled ? '🔔 新订单提醒已开启' : '🔕 开启新订单提醒'}
+            </button>
+            <OrderList orders={orders} admin onAdvance={advanceOrder} onCopy={copyOrder} />
             <p className="footer-note">每完成一单，恋爱余额 +1</p>
           </section>
         )}
       </main>
       <div className={`toast ${toast ? 'show' : ''}`}>{toast}</div>
     </>
+  )
+}
+
+function SyncChip({ state, onRetry }) {
+  const label = state.mode === 'online'
+    ? `● ${state.message}`
+    : state.mode === 'connecting'
+      ? `◌ ${state.message}`
+      : `○ ${state.message}`
+
+  return (
+    <button className={`sync-chip ${state.mode}`} onClick={state.mode === 'offline' ? onRetry : undefined}>
+      {label}{state.mode === 'offline' ? ' · 点我重试' : ''}
+    </button>
+  )
+}
+
+function PinGate({ onUnlock }) {
+  const [pin, setPin] = useState('')
+  const [error, setError] = useState('')
+
+  function submit(event) {
+    event.preventDefault()
+    if (pin === BOY_PIN) {
+      onUnlock()
+      return
+    }
+    setError('暗号不对，再想想')
+    setPin('')
+  }
+
+  return (
+    <form className="pin-gate" onSubmit={submit}>
+      <div className="pin-icon">🔐</div>
+      <h2>男朋友工作台</h2>
+      <p>输入我们的小暗号，才能查看和处理订单。</p>
+      <input
+        value={pin}
+        onChange={event => {
+          setPin(event.target.value.replace(/\D/g, '').slice(0, 4))
+          setError('')
+        }}
+        inputMode="numeric"
+        autoComplete="one-time-code"
+        placeholder="四位暗号"
+        aria-label="四位暗号"
+      />
+      {error ? <span className="pin-error">{error}</span> : null}
+      <button className="primary" type="submit">进入工作台</button>
+    </form>
   )
 }
 
@@ -314,7 +450,7 @@ function SummaryRow({ label, value }) {
   )
 }
 
-function OrderList({ orders, admin, onAdvance }) {
+function OrderList({ orders, admin, onAdvance, onCopy }) {
   if (!orders.length) {
     return (
       <div className="empty">
@@ -351,6 +487,11 @@ function OrderList({ orders, admin, onAdvance }) {
           {admin && order.status < 3 ? (
             <button className="secondary" onClick={() => onAdvance(order.id)}>
               {nextActionText[order.status]}
+            </button>
+          ) : null}
+          {admin ? (
+            <button className="copy-order" onClick={() => onCopy(order)}>
+              复制订单，去付款
             </button>
           ) : null}
         </article>

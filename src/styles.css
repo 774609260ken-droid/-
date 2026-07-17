@@ -78,6 +78,23 @@ button { -webkit-tap-highlight-color: transparent; }
   background: #fff;
   box-shadow: 0 5px 15px rgba(206, 96, 125, .12);
 }
+.mode-switch.role-locked { display: none; }
+
+.sync-chip {
+  display: block;
+  width: fit-content;
+  margin: -4px 0 14px auto;
+  border: 1px solid #f0dce1;
+  border-radius: 999px;
+  padding: 7px 10px;
+  background: #fff;
+  color: #987982;
+  font-size: 11px;
+  font-weight: 800;
+}
+.sync-chip.online { border-color: #cce8da; background: #effaf5; color: #38856a; }
+.sync-chip.offline { border-color: #f2ccd5; background: #fff1f4; color: #b4596a; }
+.sync-chip.connecting { cursor: default; }
 
 .hero, .admin-hero {
   position: relative;
@@ -213,6 +230,47 @@ button { -webkit-tap-highlight-color: transparent; }
   color: var(--pink-deep);
   background: var(--soft);
 }
+
+.alert-button, .copy-order {
+  width: 100%;
+  border: 1px solid #f0d9df;
+  border-radius: 15px;
+  padding: 12px 14px;
+  background: #fff;
+  color: #8d6e77;
+  font-weight: 800;
+}
+.alert-button { margin: 0 0 14px; }
+.alert-button.enabled { border-color: #cce8da; background: #effaf5; color: #38856a; }
+.copy-order { margin-top: 8px; }
+
+.pin-gate {
+  margin-top: 34px;
+  border: 1px solid rgba(255, 255, 255, .95);
+  border-radius: 28px;
+  padding: 28px 22px;
+  background: linear-gradient(145deg, #ffecf0, #fff);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+.pin-icon { font-size: 44px; }
+.pin-gate h2 { margin: 10px 0 7px; font-size: 23px; }
+.pin-gate p { margin: 0 auto 18px; color: #94727c; font-size: 13px; line-height: 1.6; }
+.pin-gate input {
+  width: 100%;
+  outline: none;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 13px 14px;
+  background: #fff;
+  color: #5e4750;
+  text-align: center;
+  letter-spacing: .28em;
+  font-size: 18px;
+  font-weight: 800;
+}
+.pin-gate input:focus { border-color: #ff9fb2; box-shadow: 0 0 0 3px rgba(255, 159, 178, .12); }
+.pin-error { display: block; margin-top: 9px; color: #c85872; font-size: 12px; }
 
 .admin-hero { margin-bottom: 14px; }
 .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 18px; }

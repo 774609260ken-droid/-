@@ -1,16 +1,13 @@
-import cloudbase from '@cloudbase/js-sdk'
-
 const CLOUD_CONFIG = {
-  env: 'ken1370838788-d9gyeeebwdbba971e',
-  region: 'ap-shanghai',
-  collection: 'orders',
-  roomId: 'miaomiao-ken',
+  env: import.meta.env.VITE_CLOUDBASE_ENV_ID || 'ken1370838788-d9gyeeebwdbba971e',
+  region: import.meta.env.VITE_CLOUDBASE_REGION || 'ap-shanghai',
+  collection: import.meta.env.VITE_CLOUDBASE_COLLECTION || 'orders',
+  roomId: import.meta.env.VITE_CLOUDBASE_ROOM_ID || 'miaomiao-ken',
 }
 
 let app = null
-let db = null
 let ordersCollection = null
-let currentUserId = ''
+let initPromise = null
 
 export function getCloudConfig() {
   return {
@@ -33,30 +30,73 @@ function toMillis(value) {
 
 function normalizeOrder(doc) {
   return {
-    ...doc,
-    id: doc.orderId || doc.id || doc._id,
-    createdAtMs: doc.createdAtMs || toMillis(doc.createdAt) || Date.now(),
+    id: String(doc.orderId || doc.id || doc._id),
+    brand: doc.brand || '',
+    drink: doc.drink || '',
+    emoji: doc.emoji || '🧋',
+    price: Number(doc.price) || 0,
+    sweetness: doc.sweetness || '五分糖',
+    ice: doc.ice || '少冰',
+    note: doc.note || '',
+    status: Math.max(0, Math.min(3, Number(doc.status) || 0)),
+    time: doc.time || '',
+    createdAtMs: Number(doc.createdAtMs) || toMillis(doc.createdAt) || Date.now(),
+    updatedAtMs: Number(doc.updatedAtMs) || toMillis(doc.updatedAt) || 0,
+  }
+}
+
+function normalizeOrders(documents) {
+  const orders = new Map()
+  documents.map(normalizeOrder).forEach(order => {
+    const existing = orders.get(order.id)
+    if (!existing || order.updatedAtMs >= existing.updatedAtMs) orders.set(order.id, order)
+  })
+  return [...orders.values()].sort((a, b) => a.createdAtMs - b.createdAtMs)
+}
+
+function orderDocument(order) {
+  const now = Date.now()
+  return {
+    orderId: String(order.id),
+    roomId: CLOUD_CONFIG.roomId,
+    brand: order.brand,
+    drink: order.drink,
+    emoji: order.emoji,
+    price: Number(order.price) || 0,
+    sweetness: order.sweetness,
+    ice: order.ice,
+    note: order.note || '',
+    status: Math.max(0, Math.min(3, Number(order.status) || 0)),
+    time: order.time,
+    createdAtMs: Number(order.createdAtMs) || now,
+    updatedAtMs: now,
   }
 }
 
 export async function initOrderCloud() {
   const config = getCloudConfig()
-  if (!config.enabled) return { enabled: false, userId: '' }
+  if (!config.enabled) return { enabled: false }
+  if (ordersCollection) return { enabled: true }
+  if (initPromise) return initPromise
 
-  app = cloudbase.init({ env: config.env, region: config.region })
-  const loginResult = await app.auth.signInAnonymously()
-  if (loginResult?.error) throw loginResult.error
+  initPromise = (async () => {
+    const { default: cloudbase } = await import('@cloudbase/js-sdk')
+    app = cloudbase.init({ env: config.env, region: config.region })
+    const auth = app.auth({ persistence: 'local' })
+    const loginResult = await auth.signInAnonymously()
+    if (loginResult?.error) throw loginResult.error
 
-  currentUserId = loginResult?.data?.user?.id || loginResult?.data?.user?.uid || ''
-  if (!currentUserId) {
-    const sessionResult = await app.auth.getSession()
-    if (sessionResult?.error) throw sessionResult.error
-    currentUserId = sessionResult?.data?.session?.user?.id || sessionResult?.data?.session?.user?.uid || ''
+    ordersCollection = app.database().collection(config.collection)
+    return { enabled: true }
+  })()
+
+  try {
+    return await initPromise
+  } catch (error) {
+    initPromise = null
+    ordersCollection = null
+    throw error
   }
-
-  db = app.database()
-  ordersCollection = db.collection(config.collection)
-  return { enabled: true, userId: currentUserId }
 }
 
 function collection() {
@@ -65,49 +105,43 @@ function collection() {
 }
 
 export async function fetchCloudOrders() {
-  const config = getCloudConfig()
   const result = await collection()
-    .where({ roomId: config.roomId })
-    .orderBy('createdAtMs', 'asc')
+    .where({ roomId: CLOUD_CONFIG.roomId })
     .limit(100)
     .get()
 
-  return (result?.data || [])
-    .map(normalizeOrder)
-    .sort((a, b) => a.createdAtMs - b.createdAtMs)
+  return normalizeOrders(result?.data || [])
 }
 
 export async function createCloudOrder(order) {
-  const config = getCloudConfig()
-  return collection().add({
-    ...order,
-    orderId: order.id,
-    roomId: config.roomId,
-    createdBy: currentUserId,
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  })
+  const data = orderDocument(order)
+  return collection().doc(data.orderId).set(data)
 }
 
 export async function updateCloudOrder(orderId, status) {
-  const config = getCloudConfig()
-  return collection()
-    .where({ roomId: config.roomId, orderId })
-    .update({ status, updatedAt: new Date() })
+  const data = {
+    status: Math.max(0, Math.min(3, Number(status) || 0)),
+    updatedAtMs: Date.now(),
+  }
+
+  try {
+    return await collection().doc(String(orderId)).update(data)
+  } catch {
+    return collection()
+      .where({ roomId: CLOUD_CONFIG.roomId, orderId: String(orderId) })
+      .update(data)
+  }
 }
 
 export function watchCloudOrders(onChange, onError) {
-  const config = getCloudConfig()
   const watcher = collection()
-    .where({ roomId: config.roomId })
+    .where({ roomId: CLOUD_CONFIG.roomId })
     .watch({
       onChange(snapshot) {
-        const orders = (snapshot?.docs || [])
-          .map(normalizeOrder)
-          .sort((a, b) => a.createdAtMs - b.createdAtMs)
-        onChange(orders)
+        onChange(normalizeOrders(snapshot?.docs || []))
       },
       onError,
     })
+
   return () => watcher?.close?.()
 }
